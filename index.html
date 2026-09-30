@@ -116,7 +116,7 @@ button:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
     <div class="donate">
       <span class="donateLabel" data-i18n="donateLabel"></span>
       <div class="donateRow">
-        <span class="donateCard" id="donateCard">9860 1666 5541 7490</span>
+        <span class="donateCard" id="donateCard">0000 0000 0000 0000</span>
         <button id="donateCopy" data-i18n="donateCopy"></button>
       </div>
       <span class="donateName" id="donateName">Firdavs Hamroqulov</span>
@@ -349,4 +349,292 @@ function applyLang(){
   if (countN){ $("#cstats").innerHTML = summaryHTML(countN); renderSheets(countN, $("#csheets")); }
   paintCerr(); paintMsg();
 }
-document.query
+document.querySelectorAll(".lang button").forEach(b => b.addEventListener("click", () => {
+  lang = b.dataset.lang;
+  try{ localStorage.setItem("lang", lang); }catch(e){}
+  applyLang();
+}));
+
+/* ---- rejimlar ---- */
+document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll(".tabs button").forEach(x => x.setAttribute("aria-selected", String(x === b)));
+  $("#pdfView").hidden = b.dataset.mode !== "pdf";
+  $("#countView").hidden = b.dataset.mode !== "count";
+  $("#wordView").hidden = b.dataset.mode !== "word";
+}));
+
+/* ---- sahifalar soni ---- */
+$("#n").addEventListener("input", () => {
+  const v = $("#n").value.trim(), n = parseInt(v, 10);
+  countN = null; $("#calc").hidden = true;
+  if (!v) cKey = "hint";
+  else if (!/^\d+$/.test(v) || n < 1) cKey = "errInt";
+  else if (n > MAX_COUNT) cKey = "errBig";
+  else { cKey = "hint"; countN = n; }
+  if (countN){
+    $("#cstats").innerHTML = summaryHTML(countN);
+    renderSheets(countN, $("#csheets"));
+    $("#calc").hidden = false;
+  }
+  paintCerr();
+});
+
+/* ---- fayl tanlash ---- */
+const drop = $("#drop"), input = $("#file");
+input.addEventListener("change", () => input.files[0] && loadFile(input.files[0]));
+["dragenter","dragover"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add("over"); }));
+["dragleave","drop"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", ev => { const f = ev.dataTransfer.files[0]; if (f) loadFile(f); });
+
+async function loadFile(f){
+  outBytes = null; fileOk = false; $("#out").hidden = true; $("#tip").hidden = true; $("#prog").hidden = true; say(null);
+  $("#info").hidden = false; $("#go").disabled = true;
+  $("#stats").textContent = ""; $("#sheets").innerHTML = ""; $("#fname").textContent = f.name;
+  if (!/\.pdf$/i.test(f.name) && f.type !== "application/pdf"){ say("notPdf", [], "err"); return; }
+  try{
+    srcBytes = new Uint8Array(await f.arrayBuffer());
+    const d = await PDFLib.PDFDocument.load(srcBytes, { ignoreEncryption: true });
+    total = d.getPageCount();
+  }catch(e){ say("cantRead", [], "err"); return; }
+  if (total < 1){ say("noPages", [], "err"); return; }
+  outName = f.name.replace(/\.pdf$/i, "") + "-booklet.pdf";
+  fileOk = true;
+  $("#stats").innerHTML = summaryHTML(total);
+  renderSheets(total, $("#sheets"));
+  $("#go").disabled = false;
+}
+
+/* ---- booklet algoritmi ---- */
+function progress(p, label){
+  const bar = $("#bar"); bar.classList.toggle("busy", p == null);
+  if (p != null) $("#fill").style.width = Math.round(p * 100) + "%";
+  $("#pct").textContent = label || "";
+}
+
+async function build(){
+  const { PDFDocument } = PDFLib;
+  const src = await PDFDocument.load(srcBytes, { ignoreEncryption: true });
+  const out = await PDFDocument.create();
+  const n = src.getPageCount(), N = Math.ceil(n / 4) * 4, sheets = N / 4;
+
+  progress(null, t("prepPages"));
+  await tick();
+  const emb = await out.embedPages(src.getPages());
+
+  const half = A4W / 2;
+  const pnumOn = $("#pnum").checked;
+  const font = pnumOn ? await out.embedFont(PDFLib.StandardFonts.Helvetica) : null;
+  const place = (page, idx, col) => {           // idx: 1 dan boshlanadi
+    if (idx > n) return;                          // bo'sh sahifa
+    const e = emb[idx - 1];
+    const s = Math.min(half / e.width, A4H / e.height);
+    const w = e.width * s, h = e.height * s;
+    page.drawPage(e, { x: col * half + (half - w) / 2, y: (A4H - h) / 2, width: w, height: h });
+    if (pnumOn){
+      const label = String(idx), size = 8;
+      const tw = font.widthOfTextAtSize(label, size);
+      page.drawText(label, { x: col * half + half / 2 - tw / 2, y: 8, size, font, color: PDFLib.rgb(0.55, 0.55, 0.55) });
+    }
+  };
+
+  for (let i = 0; i < sheets; i++){
+    const fr = out.addPage([A4W, A4H]);           // old: [N-2i, 1+2i]
+    place(fr, N - 2 * i, 0); place(fr, 1 + 2 * i, 1);
+    const bk = out.addPage([A4W, A4H]);           // orqa: [2+2i, N-1-2i]
+    place(bk, 2 + 2 * i, 0); place(bk, N - 1 - 2 * i, 1);
+    progress((i + 1) / sheets, t("sheetProg", i + 1, sheets));
+    await tick();
+  }
+  progress(null, t("saving"));
+  await tick();
+  return await out.save();
+}
+
+$("#go").addEventListener("click", async () => {
+  $("#go").disabled = true; $("#out").hidden = true; $("#tip").hidden = true; say(null);
+  $("#prog").hidden = false;
+  try{
+    outBytes = await build();
+    $("#prog").hidden = true;
+    say("ready", [outName, (outBytes.length / 1048576).toFixed(1)], "ok");
+    $("#out").hidden = false; $("#tip").hidden = false;
+  }catch(e){
+    $("#prog").hidden = true;
+    say("fail", [e && e.message], "err");
+  }finally{ $("#go").disabled = false; }
+});
+
+/* ---- yuklab olish / ulashish ---- */
+function toBase64(bytes){
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result).split(",")[1]);
+    r.onerror = rej;
+    r.readAsDataURL(new Blob([bytes], { type: "application/pdf" }));
+  });
+}
+
+$("#dl").addEventListener("click", async () => {
+  if (!outBytes) return;
+  if (isNative()){
+    try{
+      const { Filesystem } = Capacitor.Plugins;
+      await Filesystem.writeFile({ path: "Kitobcha/" + outName, data: await toBase64(outBytes),
+        directory: "DOCUMENTS", recursive: true });
+      say("savedDocs", [outName], "ok");
+    }catch(e){ say("saveFail", [], "err"); }
+  }else{
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([outBytes], { type: "application/pdf" }));
+    a.download = outName; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }
+});
+
+$("#share").addEventListener("click", async () => {
+  if (!outBytes) return;
+  try{
+    if (isNative()){
+      const { Filesystem, Share } = Capacitor.Plugins;
+      const { uri } = await Filesystem.writeFile({ path: outName, data: await toBase64(outBytes), directory: "CACHE" });
+      await Share.share({ title: outName, url: uri, dialogTitle: t("shareDialog") });
+    }else{
+      const file = new File([outBytes], outName, { type: "application/pdf" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file], title: outName });
+      else $("#dl").click();
+    }
+  }catch(e){ /* foydalanuvchi bekor qildi */ }
+});
+
+/* ---- PDF -> Word ---- */
+let srcBytesW = null, fileOkW = false, outBlobW = null, outNameW = "";
+const dropW = $("#dropW"), inputW = $("#fileW");
+inputW.addEventListener("change", () => inputW.files[0] && loadFileW(inputW.files[0]));
+["dragenter","dragover"].forEach(e => dropW.addEventListener(e, ev => { ev.preventDefault(); dropW.classList.add("over"); }));
+["dragleave","drop"].forEach(e => dropW.addEventListener(e, ev => { ev.preventDefault(); dropW.classList.remove("over"); }));
+dropW.addEventListener("drop", ev => { const f = ev.dataTransfer.files[0]; if (f) loadFileW(f); });
+
+function sayW(msg, kind){ const m = $("#msgW"); m.textContent = msg || ""; m.className = "msg " + (kind || ""); }
+function progressW(p, label){
+  const bar = $("#barW"); bar.classList.toggle("busy", p == null);
+  if (p != null) $("#fillW").style.width = Math.round(p * 100) + "%";
+  $("#pctW").textContent = label || "";
+}
+
+async function loadFileW(f){
+  outBlobW = null; fileOkW = false; $("#outW").hidden = true; $("#progW").hidden = true; sayW("");
+  $("#infoW").hidden = false; $("#goW").disabled = true; $("#fnameW").textContent = f.name;
+  if (!/\.pdf$/i.test(f.name) && f.type !== "application/pdf"){ sayW(t("notPdf"), "err"); return; }
+  try{ srcBytesW = new Uint8Array(await f.arrayBuffer()); }
+  catch(e){ sayW(t("cantRead"), "err"); return; }
+  outNameW = f.name.replace(/\.pdf$/i, "") + ".docx";
+  fileOkW = true; $("#goW").disabled = false;
+}
+
+/* Har bir sahifadagi matnni koordinata bo'yicha qatorlarga guruhlab, .docx qiladi */
+async function convertToWord(bytes){
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.worker.min.js";
+  const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+  const children = [];
+  for (let p = 1; p <= pdf.numPages; p++){
+    progressW(p / pdf.numPages, `${p} / ${pdf.numPages}`);
+    await tick();
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    const items = content.items
+      .map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5], h: Math.abs(it.transform[3]) || 10 }))
+      .filter(it => it.str !== "");
+    items.sort((a, b) => b.y - a.y || a.x - b.x);
+    const lines = [];
+    let cur = null;
+    for (const it of items){
+      if (!cur || Math.abs(it.y - cur.y) > cur.h * 0.45){ cur = { y: it.y, h: it.h, parts: [] }; lines.push(cur); }
+      cur.parts.push(it);
+    }
+    if (lines.length === 0) children.push(new docx.Paragraph({ children: [] }));
+    for (const line of lines){
+      line.parts.sort((a, b) => a.x - b.x);
+      let text = "", lastEnd = null;
+      for (const part of line.parts){
+        if (lastEnd != null && part.x - lastEnd > line.h * 0.3) text += " ";
+        text += part.str;
+        lastEnd = part.x + part.str.length * line.h * 0.5;
+      }
+      text = text.trim();
+      if (text) children.push(new docx.Paragraph({
+        children: [new docx.TextRun({ text, size: Math.max(16, Math.round(line.h * 2)) })]
+      }));
+    }
+    if (p < pdf.numPages) children.push(new docx.Paragraph({ children: [new docx.PageBreak()] }));
+  }
+  const doc = new docx.Document({ sections: [{ children }] });
+  return await docx.Packer.toBlob(doc);
+}
+
+$("#goW").addEventListener("click", async () => {
+  $("#goW").disabled = true; $("#outW").hidden = true; sayW("");
+  $("#progW").hidden = false;
+  try{
+    outBlobW = await convertToWord(srcBytesW);
+    $("#progW").hidden = true;
+    sayW(t("ready", outNameW, (outBlobW.size / 1048576).toFixed(1)), "ok");
+    $("#outW").hidden = false;
+  }catch(e){
+    $("#progW").hidden = true;
+    sayW(t("fail", e && e.message), "err");
+  }finally{ $("#goW").disabled = false; }
+});
+
+$("#dlW").addEventListener("click", async () => {
+  if (!outBlobW) return;
+  if (isNative()){
+    try{
+      const { Filesystem } = Capacitor.Plugins;
+      const b64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(String(r.result).split(",")[1]);
+        r.onerror = rej; r.readAsDataURL(outBlobW);
+      });
+      await Filesystem.writeFile({ path: "Kitobcha/" + outNameW, data: b64, directory: "DOCUMENTS", recursive: true });
+      sayW(t("savedDocs", outNameW), "ok");
+    }catch(e){ sayW(t("saveFail"), "err"); }
+  }else{
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(outBlobW);
+    a.download = outNameW; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }
+});
+
+/* ---- chop etish (bir tomonlama) ---- */
+async function printPages(which){
+  if (!outBytes) return;
+  try{
+    const src = await PDFLib.PDFDocument.load(outBytes);
+    const doc = await PDFLib.PDFDocument.create();
+    const idx = [];
+    for (let i = which === "front" ? 0 : 1; i < src.getPageCount(); i += 2) idx.push(i);
+    (await doc.copyPages(src, idx)).forEach(pg => doc.addPage(pg));
+    const url = URL.createObjectURL(new Blob([await doc.save()], { type: "application/pdf" }));
+    const f = document.createElement("iframe");
+    f.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0";
+    f.onload = () => { try{ f.contentWindow.focus(); f.contentWindow.print(); }catch(e){ window.open(url); } };
+    f.src = url; document.body.appendChild(f);
+    setTimeout(() => { f.remove(); URL.revokeObjectURL(url); }, 120000);
+  }catch(e){ say("fail", [e && e.message], "err"); }
+}
+$("#pf").addEventListener("click", () => printPages("front"));
+$("#pb").addEventListener("click", () => printPages("back"));
+if (isNative()) $("#printRow").hidden = true;
+
+$("#donateCopy").addEventListener("click", async () => {
+  const num = $("#donateCard").textContent.replace(/\s/g, "");
+  try{ await navigator.clipboard.writeText(num); }catch(e){}
+  const btn = $("#donateCopy"), old = btn.textContent;
+  btn.textContent = "✓"; setTimeout(() => { btn.textContent = old; }, 1200);
+});
+
+applyLang();
+</script>
+</body>
+</html>
